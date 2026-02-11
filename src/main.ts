@@ -86,6 +86,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let engine: MLCEngineInterface | null = null;
 let engineReady = false;
+let applyingHighlights = false;
 
 const $ = (sel: string) => document.querySelector(sel) as HTMLElement | null;
 
@@ -115,9 +116,19 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Normalize whitespace for matching: collapse runs to single space, trim */
+/** Normalize for matching: collapse whitespace, normalize line endings, trim */
 function normalizeForMatch(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+  return s.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim();
+}
+
+/** Strip trailing sentence punctuation so "day." matches "day" */
+function stripTrailingPunctuation(s: string): string {
+  return s.replace(/[.,;:!?]+$/, "").trim();
+}
+
+/** Strip optional surrounding quotes (straight, curly, angle) for matching */
+function stripQuotes(s: string): string {
+  return s.replace(/^[\s"'\u201c\u201d\u00ab\u00bb]+|[\s"'\u201c\u201d\u00ab\u00bb]+$/g, "").trim();
 }
 
 /**
@@ -145,18 +156,73 @@ function buildNormalizedMap(text: string): { normalized: string; origStart: numb
   return { normalized: normalized.join(""), origStart };
 }
 
-/** Find first occurrence of sentence in text, with flexible whitespace. Returns [start, end] in original text or null. */
+/** Find first occurrence of sentence in text, with flexible whitespace and optional trailing punctuation. Returns [start, end] in original text or null. */
 function findSentenceRange(text: string, sentence: string): [number, number] | null {
-  const s = normalizeForMatch(sentence);
-  if (!s) return null;
+  const raw = normalizeForMatch(sentence);
+  if (!raw) return null;
   const { normalized, origStart } = buildNormalizedMap(text);
-  const idx = normalized.indexOf(s);
-  if (idx < 0) return null;
-  const endNorm = idx + s.length;
+  if (origStart.length === 0) return null;
+  // Try exact match, then without trailing punctuation, then without quotes
+  let idx = normalized.indexOf(raw);
+  let matchLen = raw.length;
+  if (idx < 0) {
+    const withoutPunct = stripTrailingPunctuation(raw);
+    if (withoutPunct) {
+      idx = normalized.indexOf(withoutPunct);
+      matchLen = withoutPunct.length;
+    }
+  }
+  if (idx < 0) {
+    const unquoted = stripQuotes(raw);
+    if (unquoted) {
+      idx = normalized.indexOf(unquoted);
+      matchLen = unquoted.length;
+    }
+  }
+  if (idx < 0) {
+    const unquotedNoPunct = stripTrailingPunctuation(stripQuotes(raw));
+    if (unquotedNoPunct) {
+      idx = normalized.indexOf(unquotedNoPunct);
+      matchLen = unquotedNoPunct.length;
+    }
+  }
+  if (idx < 0) {
+    return findLongestPhraseInText(raw, normalized, origStart);
+  }
+  const endNorm = idx + matchLen;
   if (endNorm > origStart.length) return null;
   const startOrig = origStart[idx];
   const endOrig = origStart[endNorm - 1] + 1;
   return [startOrig, endOrig];
+}
+
+/** Fallback: find the longest phrase from the sentence (by words) that appears in normalized text. */
+function findLongestPhraseInText(
+  sentence: string,
+  normalized: string,
+  origStart: number[]
+): [number, number] | null {
+  const words = sentence.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  for (let k = words.length; k >= 1; k--) {
+    const phrase = words.slice(0, k).join(" ");
+    let idx = normalized.indexOf(phrase);
+    let matchLen = phrase.length;
+    if (idx < 0) {
+      const noPunct = stripTrailingPunctuation(phrase);
+      if (noPunct) {
+        idx = normalized.indexOf(noPunct);
+        matchLen = noPunct.length;
+      }
+    }
+    if (idx >= 0 && matchLen > 0) {
+      const endNorm = idx + matchLen;
+      if (endNorm <= origStart.length) {
+        return [origStart[idx], origStart[endNorm - 1] + 1];
+      }
+    }
+  }
+  return null;
 }
 
 function findRanges(text: string, sentences: string[]): [number, number][] {
@@ -193,7 +259,11 @@ function applyHighlights(editor: HTMLElement, sentences: string[]) {
     pos = end;
   }
   html += escapeHtml(text.slice(pos));
+  applyingHighlights = true;
   editor.innerHTML = html;
+  requestAnimationFrame(() => {
+    applyingHighlights = false;
+  });
 }
 
 function clearHighlights(editor: HTMLElement) {
@@ -378,6 +448,7 @@ function triggerThought() {
 }
 
 function onTextInput() {
+  if (applyingHighlights) return;
   scheduleSave();
   clearThought();
   if (debounceTimer) clearTimeout(debounceTimer);
