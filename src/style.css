@@ -61,9 +61,11 @@ body {
 }
 
 .editor .highlight {
+  background: rgba(107, 127, 215, 0.15);
   text-decoration: underline wavy;
   text-decoration-color: #6b7fd7;
   text-underline-offset: 3px;
+  border-radius: 2px;
 }
 
 .sidebar {

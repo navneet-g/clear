@@ -112,15 +112,6 @@ function setError(msg: string | null) {
   errorEl.textContent = msg || "";
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 /** Normalize for matching: collapse whitespace, normalize line endings, trim */
 function normalizeForMatch(s: string): string {
   return s.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim();
@@ -238,6 +229,19 @@ function findRanges(text: string, sentences: string[]): [number, number][] {
     const range = findSentenceRange(text, trimmed);
     if (range) ranges.push(range);
   }
+  if (ranges.length === 0 && text.trim().length > 0 && sentences.length > 0) {
+    const firstSentence = sentences[0].trim();
+    const words = firstSentence.split(/\s+/).filter((w) => w.length > 2);
+    for (const word of words) {
+      const clean = word.replace(/[.,;:!?]+$/, "");
+      if (clean.length < 3) continue;
+      const i = text.indexOf(clean);
+      if (i >= 0) {
+        ranges.push([i, i + clean.length]);
+        break;
+      }
+    }
+  }
   ranges.sort((a, b) => a[0] - b[0]);
   const merged: [number, number][] = [];
   for (const [start, end] of ranges) {
@@ -251,21 +255,58 @@ function findRanges(text: string, sentences: string[]): [number, number][] {
   return merged;
 }
 
+/** Find (node, offset) for the given character index by walking text nodes. */
+function getTextNodePosition(
+  root: HTMLElement,
+  charIndex: number
+): { node: Text; offset: number } | null {
+  let count = 0;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  let node: Node | null = walker.currentNode;
+  while (node) {
+    const len = (node.textContent ?? "").length;
+    if (count + len > charIndex) {
+      return { node: node as Text, offset: charIndex - count };
+    }
+    count += len;
+    node = walker.nextNode();
+  }
+  return null;
+}
+
+/** Apply highlights by wrapping text node ranges in spans (preserves contenteditable structure). */
 function applyHighlights(editor: HTMLElement, sentences: string[]) {
   const text = editor.innerText || "";
   if (!text.trim() || !sentences.length) return;
-  const ranges = findRanges(text, sentences);
-  if (ranges.length === 0) return;
-  let html = "";
-  let pos = 0;
-  for (const [start, end] of ranges) {
-    html += escapeHtml(text.slice(pos, start));
-    html += '<span class="highlight">' + escapeHtml(text.slice(start, end)) + "</span>";
-    pos = end;
+  let ranges = findRanges(text, sentences);
+  if (ranges.length === 0) {
+    const len = Math.min(50, text.trim().length);
+    const start = text.indexOf(text.trim()[0]);
+    if (start >= 0 && len > 0) ranges = [[start, start + len]];
   }
-  html += escapeHtml(text.slice(pos));
+  if (ranges.length === 0) return;
   applyingHighlights = true;
-  editor.innerHTML = html;
+  for (const [start, end] of ranges.slice().sort((a, b) => b[0] - a[0])) {
+    const startPos = getTextNodePosition(editor, start);
+    const endPos = getTextNodePosition(editor, end);
+    if (!startPos || !endPos) continue;
+    try {
+      const range = document.createRange();
+      range.setStart(startPos.node, startPos.offset);
+      range.setEnd(endPos.node, endPos.offset);
+      const span = document.createElement("span");
+      span.className = "highlight";
+      try {
+        range.surroundContents(span);
+      } catch {
+        const fragment = range.extractContents();
+        span.appendChild(fragment);
+        range.insertNode(span);
+      }
+    } catch {
+      // skip this range if DOM update fails
+    }
+  }
   requestAnimationFrame(() => {
     applyingHighlights = false;
   });
